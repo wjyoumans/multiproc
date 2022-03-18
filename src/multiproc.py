@@ -68,23 +68,21 @@ def gen_cmds(cmd, modifiers):
     
     # only support modifiers %0-%9
     if modifiers is None:
-        return cmd
+        yield cmd, "mp.out"
     else:
         assert len(modifiers) < 11
-    
-    products = product(*modifiers)
+        
+        products = product(*modifiers)
+        x = ["%"+str(i) for i in range(len(modifiers))]
+        for prod in products:
+            suffix = "".join(["_"+str(i) for i in list(prod)])
 
-    x = ["%"+str(i) for i in range(len(modifiers))]
+            new_cmd = cmd
+            s = [str(p) for p in prod]
+            for sub in zip(x, s):
+                new_cmd = new_cmd.replace(*sub)
 
-    for prod in products:
-        suffix = "".join(["_"+str(i) for i in list(prod)])
-
-        new_cmd = cmd
-        s = [str(p) for p in prod]
-        for sub in zip(x, s):
-            new_cmd = new_cmd.replace(*sub)
-
-        yield new_cmd, "mp"+suffix+".out"
+            yield new_cmd, "mp"+suffix+".out"
 
 def logger(log, log_file):
     """ listen for log messages and write to the log file."""
@@ -131,7 +129,7 @@ def execute(args):
     pool = ThreadPool(processes=num_proc+1)
 
     #put logging thread to work first
-    log_file = os.path.join(mpout_dir, "log")
+    log_file = os.path.join(out_dir, "log")
     log_listener = pool.apply_async(logger, (log, log_file))
 
     log.put("Input: {}".format(" ".join(sys.argv)))
