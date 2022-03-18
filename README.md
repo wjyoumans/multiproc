@@ -20,7 +20,7 @@ python script.py 6
 python script.py 8
 ```
 
-We can also combine command modifiers in a simple way:
+We can also combine command modifiers in a straightforward way:
 
 ```
 multiproc.py "python script.py %0 %1" -m 2 3
@@ -37,8 +37,8 @@ python script.py 2 2
 python script.py 2 3
 ```
 
-Output is stored in an `mpout` folder created in the working directory. Logging info from each process is stored in `mpout/log`. 
+Output is stored in an `mpout` folder created in the working directory. Logging info from each process is stored in `mpout/../log`.
 
 The number of processes to use defaults to the number of (virtual) cores available but can be modified with `-j`.
 
-It's often useful to use multiproc with `nohup` and `&` to have everything running in the background.
+It's often useful to use multiproc with `nohup` and `&` to have everything running in the background. In this case, it is up to you to clean up.

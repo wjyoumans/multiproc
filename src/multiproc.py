@@ -2,7 +2,7 @@
 
 from __future__ import print_function
 
-import os, sys, glob, time, datetime, shlex
+import os, signal, sys, glob, time, datetime, shlex
 import argparse
 import math
 import multiprocessing
@@ -13,6 +13,9 @@ from multiprocessing.dummy import Pool
 from itertools import product, repeat
 from functools import partial
 from hashlib import md5
+
+mpout_dir = "mpout"
+pid_file = os.path.join(mpout_dir, "pids")
 
 def worker(cmd, out_file, log, shell):
     """ Spawn the next process. """
@@ -31,27 +34,55 @@ def worker(cmd, out_file, log, shell):
             p.wait()
         else:
             cmds = cmd.split("|")
-            p1 = subprocess.Popen(
-                    shlex.split(cmds[0]),
-                    stdout=subprocess.PIPE,
-                    stderr=fp
-                )
-            log.put(f"<pid:{p1.pid}> Executing command: \"{cmds[0]}\"")
-            for c in cmds[1:]:
-                p2 = subprocess.Popen(
-                        shlex.split(c),
-                        stdin=p1.stdout,
+            if len(cmds) == 1:
+                p = subprocess.Popen(
+                        shlex.split(cmds[0]),
+                        stdout=fp,
+                        stderr=fp
+                    )
+            elif len(cmds) == 2:
+                p1 = subprocess.Popen(
+                        shlex.split(cmds[0]),
                         stdout=subprocess.PIPE,
                         stderr=fp
                     )
+                log.put(f"<pid:{p1.pid}> Executing command: \"{cmds[0]}\"")
+                p2 = subprocess.Popen(
+                        shlex.split(cmds[1]),
+                        stdin=p1.stdout,
+                        stdout=fp,
+                        stderr=fp
+                    )
+                log.put(f"<pid:{p2.pid}> Executing command: \"{cmds[1]}\"")
                 p1.stdout.close()
-                log.put(f"<pid:{p2.pid}> Piping command to <pid:p1.pid>: \"{c}\"")
-                p1 = p2
-
-            outs, errs = p1.communicate()
-            fp.write(outs)
-            p = p1
-
+                p = p2
+            else:
+                p1 = subprocess.Popen(
+                        shlex.split(cmds[0]),
+                        stdout=subprocess.PIPE,
+                        stderr=fp
+                    )
+                log.put(f"<pid:{p1.pid}> Executing command: \"{cmds[0]}\"")
+                for c in cmds[1:-1]:
+                    p2 = subprocess.Popen(
+                            shlex.split(c),
+                            stdin=p1.stdout,
+                            stdout=subprocess.PIPE,
+                            stderr=fp
+                        )
+                    log.put(f"<pid:{p2.pid}> Executing command: \"{c}\"")
+                    p1.stdout.close()
+                    p1 = p2
+                p = subprocess.Popen(
+                        shlex.split(cmds[-1]),
+                        stdin=p1.stdout,
+                        stdout=fp,
+                        stderr=fp
+                    )
+                log.put(f"<pid:{p.pid}> Executing command: \"{cmds[-1]}\"")
+                p1.stdout.close()
+    
+    p.wait()
     return p, cmd, time.time() - t, log
 
 def callback(result):
@@ -96,7 +127,22 @@ def logger(log, log_file):
             fp.write(f"{t}: {m}\n")
             fp.flush()
     
-def execute(args):
+def add_pid(pid):
+    with open(pid_file, "a") as fp:
+        fp.write(f"{pid}\n")
+
+def remove_pid(pid):
+    pids = []
+    with open(pid_file, "r") as fp:
+        lines = fp.readlines()
+        pids = [int(pid) for pid in lines]
+
+    pids.remove(pid)
+    with open(pid_file, "w") as fp:
+        for p in pids:
+            fp.write(f"{p}\n")
+
+def run(args):
     """ Distribute commands over multiple processes."""
 
     # truncate hash for readability
@@ -107,17 +153,21 @@ def execute(args):
         num_jobs = math.prod([len(a) for a in args.modifiers])
 
     # create mpout directories if they don't exist
-    mpout_dir = "mpout"
     if not os.path.exists(mpout_dir):
         os.mkdir(mpout_dir)
 
-    t = str(int(time.time()))
-    out_dir = os.path.join(mpout_dir, cmd_hash+"-"+t)
-    if os.path.exists(out_dir):
-        error("Hash or time collision? Try again.")
-    else:
-        os.mkdir(out_dir)
+    add_pid(os.getpid())
 
+    i = 0
+    out_dir = os.path.join(mpout_dir, cmd_hash)
+    while True:
+        if os.path.exists(out_dir):
+            i += 1
+            out_dir = os.path.join(mpout_dir, cmd_hash + f"_{i}")
+        else:
+            break
+    os.mkdir(out_dir)
+    
     # manager to queue log messages
     manager = multiprocessing.Manager()
     log = manager.Queue()    
@@ -134,6 +184,7 @@ def execute(args):
 
     log.put("Input: {}".format(" ".join(sys.argv)))
     log.put(f"Output: {out_dir}")
+    log.put(f"Threadpool pid: {os.getpid()}")
     log.put(f"Total of {num_jobs} jobs.")
     log.put(f"Initialized worker pool of size {num_proc}.")
 
@@ -142,17 +193,38 @@ def execute(args):
     for cmd, fn in gen_cmds(args.command, args.modifiers):
         out = os.path.join(out_dir, fn)
         job = pool.apply_async(worker, (cmd, out, log, args.shell), callback=callback)
+        #job = pool.apply_async(work, (cmd, out, log, args.shell))
         jobs.append(job)
+
+    # handle signals to clean up child processes properly
+    def signal_handler(sig, frame):
+        log.put(f'Received signal {sig}: {signal.strsignal(sig)}. Cleaning up.')
+        log.put('kill')
+        pool.terminate()
+        remove_pid(os.getpid())
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGQUIT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     for job in jobs:
         job.get()
-
+    
     # kill listener
     log.put('kill')
 
     # close and join threadpool
     pool.close()
     pool.join()
+    remove_pid(os.getpid())
+
+def kill(args):
+    with open(os.path.join(mpout_dir, "pids"), "r") as fp:
+        lines = fp.readlines()
+        for pid in lines:
+            os.kill(int(pid), signal.SIGTERM)
+
 
 def modifier_to_range(s):
     mod = [int(i) for i in s.split(':')]
@@ -171,15 +243,27 @@ def modifier_to_range(s):
 if __name__ == '__main__':
     desc = "A simple CLI tool for quickly executing many similar commands in parallel."
     parser = argparse.ArgumentParser(description=desc, prog="multiproc")
-    parser.add_argument("command", help="Input command.")
-    parser.add_argument("-m", "--modifiers", help="Command modifiers.", nargs="+", 
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+
+    run_parser = subparsers.add_parser("run", help="Run a new job.")
+    run_parser.add_argument("command", help="Input command.")
+    run_parser.add_argument("-m", "--modifiers", help="Command modifiers.", nargs="+", 
             type=modifier_to_range)
-    parser.add_argument("-j", help="""Specify the number of threads to spawn. Uses the number 
+    run_parser.add_argument("-j", help="""Specify the number of threads to spawn. Uses the number 
         of (virtual) cores by default, plus one for logging.""", action="store", type=int, 
         dest="num_proc", default=0)
-    parser.add_argument("-s", "--shell", help="""Use shell pipeline support. Only for trusted 
+    run_parser.add_argument("-s", "--shell", help="""Use shell pipeline support. Only for trusted 
         input. This can help if pipes/redirects are not working properly.""", action="store_true",
         dest="shell", default=False)
+
+    kill_parser = subparsers.add_parser("kill", help="Kill jobs in progress.")
     
     args = parser.parse_args()
-    execute(args)
+
+    if args.subcommand == "run":
+        run(args)
+    elif args.subcommand == "kill":
+        kill(args)
+    else:
+        error("Not a valid subcommand.")
+
