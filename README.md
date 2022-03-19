@@ -4,7 +4,7 @@ A simple CLI tool for quickly executing many similar commands in parallel.
 
 ## Example
 
-Pretend there is a script `script.py` in your working directory that takes an integer command line argument. Then multiproc allows quickly executing this script with arguments specified in a range:
+Pretend there is a script `script.py` in your working directory that takes an integer command line argument. Multiproc allows quickly executing this script with arguments specified in a range, referred to as a modifier. 
 
 ```
 multiproc.py run "python script.py %0" -m 0:8:2
@@ -19,6 +19,8 @@ python script.py 4
 python script.py 6
 python script.py 8
 ```
+
+(A note about modifiers: A modifier range is not the same as a python range. Notably, it is not zero indexed. For example, `3` expands to `1, 2, 3`, `4:6` expands to `4, 5, 6` and `3:10:2` exapnds to `3, 5, 7, 9` ("three to ten in steps of two").
 
 We can also combine command modifiers in a straightforward way:
 
@@ -37,7 +39,8 @@ python script.py 2 2
 python script.py 2 3
 ```
 
-Output is stored in an `mpout` folder created in the working directory. Logging info from each process is stored in `mpout/../log`.
+This can be scaled to as many modifiers as you want but this is as complex as command modifiers get. Any additional complexity should be handled in your script. 
+Output is stored in an `mpout` folder created in the working directory with logging info from each process stored in `mpout/../log`.
 
 The number of processes to use defaults to the number of (virtual) cores available but can be modified with `-j`.
 
