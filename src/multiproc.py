@@ -5,9 +5,9 @@ from __future__ import print_function
 import os, signal, sys, glob, time, datetime, shlex
 import argparse
 import math
-import multiprocessing
+import multiprocessing as mp
 import subprocess
-
+#import threading
 from multiprocessing.pool import ThreadPool
 from multiprocessing.dummy import Pool
 from itertools import product, repeat
@@ -17,7 +17,7 @@ from hashlib import md5
 mpout_dir = "mpout"
 pid_file = os.path.join(mpout_dir, "pids")
 
-def worker(cmd, out_file, log, shell):
+def worker(cmd, out_file, log, recv, shell):
     """ Spawn the next process. """
 
     with open(out_file, 'wb') as fp:
@@ -30,7 +30,7 @@ def worker(cmd, out_file, log, shell):
                     stderr=fp,
                     shell=shell
                 )
-            log.put(f"<pid:{p.pid}> Executing command: \"{cmd}\"")
+            log.put(f"<pid:{p.pid}> Executing command (shell=True): \"{cmd}\"")
             p.wait()
         else:
             cmds = cmd.split("|")
@@ -46,14 +46,13 @@ def worker(cmd, out_file, log, shell):
                         stdout=subprocess.PIPE,
                         stderr=fp
                     )
-                log.put(f"<pid:{p1.pid}> Executing command: \"{cmds[0]}\"")
                 p2 = subprocess.Popen(
                         shlex.split(cmds[1]),
                         stdin=p1.stdout,
                         stdout=fp,
                         stderr=fp
                     )
-                log.put(f"<pid:{p2.pid}> Executing command: \"{cmds[1]}\"")
+                log.put(f"<pid:{p2.pid}> Executing command: \"{cmd}\"")
                 p1.stdout.close()
                 p = p2
             else:
@@ -62,7 +61,6 @@ def worker(cmd, out_file, log, shell):
                         stdout=subprocess.PIPE,
                         stderr=fp
                     )
-                log.put(f"<pid:{p1.pid}> Executing command: \"{cmds[0]}\"")
                 for c in cmds[1:-1]:
                     p2 = subprocess.Popen(
                             shlex.split(c),
@@ -70,7 +68,6 @@ def worker(cmd, out_file, log, shell):
                             stdout=subprocess.PIPE,
                             stderr=fp
                         )
-                    log.put(f"<pid:{p2.pid}> Executing command: \"{c}\"")
                     p1.stdout.close()
                     p1 = p2
                 p = subprocess.Popen(
@@ -79,17 +76,34 @@ def worker(cmd, out_file, log, shell):
                         stdout=fp,
                         stderr=fp
                     )
-                log.put(f"<pid:{p.pid}> Executing command: \"{cmds[-1]}\"")
+                log.put(f"<pid:{p.pid}> Executing command: \"{cmd}\"")
                 p1.stdout.close()
-    
-    p.wait()
-    return p, cmd, time.time() - t, log
+
+    manually_killed = False
+    while True:
+        # job finished
+        if not p.poll() is None:
+            break
+
+        # received manual kill
+        if recv.poll():
+            if recv.recv() == 'kill':
+                manually_killed = True
+                log.put(f"<pid:{p.pid}> Cleaning up.")
+                p.kill()
+                break
+
+        time.sleep(0.5)
+
+    return p, cmd, time.time() - t, log, manually_killed
 
 def callback(result):
     """ Callback triggered when the threadpool completes a job."""
-    p, cmd, t, log = result
+    p, cmd, t, log, manually_killed = result
     log.put(f"<pid:{p.pid}> Execution time: {t} seconds.")
-    if p.returncode == 0:
+    if manually_killed:
+        log.put(f"<pid:{p.pid}> Manually killed.")
+    elif p.returncode == 0:
         log.put(f"<pid:{p.pid}> Completed successfully.")
     else:
         log.put(f"<pid:{p.pid}> Failed with exit status {p.returncode}.")
@@ -169,18 +183,19 @@ def run(args):
     os.mkdir(out_dir)
     
     # manager to queue log messages
-    manager = multiprocessing.Manager()
+    manager = mp.Manager()
     log = manager.Queue()    
     
     # start threadpool to manage processes
     if args.num_proc == 0:
-        args.num_proc = multiprocessing.cpu_count()
+        args.num_proc = mp.cpu_count()
     num_proc = min(args.num_proc, num_jobs)
-    pool = ThreadPool(processes=num_proc+1)
+    pool = ThreadPool(processes=num_proc)
 
-    #put logging thread to work first
+    #put logging process to work first
     log_file = os.path.join(out_dir, "log")
-    log_listener = pool.apply_async(logger, (log, log_file))
+    log_listener = mp.Process(target=logger, args=(log, log_file))
+    log_listener.start()
 
     log.put("Input: {}".format(" ".join(sys.argv)))
     log.put(f"Output: {out_dir}")
@@ -190,29 +205,38 @@ def run(args):
 
     # spawn workers
     jobs = []
+    recv, send = mp.Pipe(duplex=False)
     for cmd, fn in gen_cmds(args.command, args.modifiers):
         out = os.path.join(out_dir, fn)
-        job = pool.apply_async(worker, (cmd, out, log, args.shell), callback=callback)
-        #job = pool.apply_async(work, (cmd, out, log, args.shell))
+        job = pool.apply_async(worker, (cmd, out, log, recv, args.shell), callback=callback)
         jobs.append(job)
 
     # handle signals to clean up child processes properly
     def signal_handler(sig, frame):
         log.put(f'Received signal {sig}: {signal.strsignal(sig)}. Cleaning up.')
+
+        # wait for threads to clean up
+        send.send('kill')
+        pool.close()
+        pool.join()
+
+        # kill log listener
         log.put('kill')
-        pool.terminate()
+
+        # remove pid from list of running pids
         remove_pid(os.getpid())
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGQUIT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGQUIT, signal_handler)
 
     for job in jobs:
         job.get()
     
     # kill listener
     log.put('kill')
+    log_listener.join()
 
     # close and join threadpool
     pool.close()
@@ -261,6 +285,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.subcommand == "run":
+        #mp.set_start_method('spawn')
         run(args)
     elif args.subcommand == "kill":
         kill(args)
