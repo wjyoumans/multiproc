@@ -7,7 +7,7 @@ A simple CLI tool for quickly executing many similar commands in parallel.
 Pretend there is a script `script.py` in your working directory that takes an integer command line argument. Then multiproc allows quickly executing this script with arguments specified in a range:
 
 ```
-multiproc.py "python script.py %0" -m 0:8:2
+multiproc.py run "python script.py %0" -m 0:8:2
 ```
 
 This will run the following commands in parallel on subprocesses:
@@ -23,7 +23,7 @@ python script.py 8
 We can also combine command modifiers in a straightforward way:
 
 ```
-multiproc.py "python script.py %0 %1" -m 2 3
+multiproc.py run "python script.py %0 %1" -m 2 3
 ```
 
 which results in:
@@ -41,4 +41,4 @@ Output is stored in an `mpout` folder created in the working directory. Logging 
 
 The number of processes to use defaults to the number of (virtual) cores available but can be modified with `-j`.
 
-It's often useful to use multiproc with `nohup` and `&` to have everything running in the background. In this case, it is up to you to clean up.
+It's often useful to use multiproc with `nohup` and `&` to have everything running in the background.To cancel jobs started in the background use the `kill` command: `multiproc.py kill`. This kills all jobs started in the working directory.
