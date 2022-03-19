@@ -1,4 +1,4 @@
-# Multiproc
+# Multiproc 
 
 A simple CLI tool for quickly executing many similar commands in parallel.
 
