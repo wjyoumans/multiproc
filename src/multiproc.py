@@ -17,7 +17,7 @@ from hashlib import md5
 mpout_dir = "mpout"
 pid_file = os.path.join(mpout_dir, "pids")
 
-def worker(cmd, out_file, log, recv, shell):
+def worker(cmd, out_file, log, kill, shell):
     """ Spawn the next process. """
 
     with open(out_file, 'wb') as fp:
@@ -86,14 +86,18 @@ def worker(cmd, out_file, log, recv, shell):
             break
 
         # received manual kill
-        if recv.poll():
-            if recv.recv() == 'kill':
-                manually_killed = True
-                log.put(f"<pid:{p.pid}> Cleaning up.")
-                p.kill()
-                break
+        try:
+            m = kill.get(timeout=0.5)
 
-        time.sleep(0.5)
+            # propagate kill command to other processes
+            kill.put('kill')
+
+            manually_killed = True
+            log.put(f"<pid:{p.pid}> Cleaning up.")
+            p.kill()
+            break
+        except:
+            pass
 
     return p, cmd, time.time() - t, log, manually_killed
 
@@ -184,7 +188,8 @@ def run(args):
     
     # manager to queue log messages
     manager = mp.Manager()
-    log = manager.Queue()    
+    log = manager.Queue()
+    kill = manager.Queue()
     
     # start threadpool to manage processes
     if args.num_proc == 0:
@@ -205,10 +210,10 @@ def run(args):
 
     # spawn workers
     jobs = []
-    recv, send = mp.Pipe(duplex=False)
+    #recv, send = mp.Pipe(duplex=False)
     for cmd, fn in gen_cmds(args.command, args.modifiers):
         out = os.path.join(out_dir, fn)
-        job = pool.apply_async(worker, (cmd, out, log, recv, args.shell), callback=callback)
+        job = pool.apply_async(worker, (cmd, out, log, kill, args.shell), callback=callback)
         jobs.append(job)
 
     # handle signals to clean up child processes properly
@@ -216,11 +221,11 @@ def run(args):
         log.put(f'Received signal {sig}: {signal.strsignal(sig)}. Cleaning up.')
 
         # wait for threads to clean up
-        send.send('kill')
+        kill.put('kill')
         pool.close()
         pool.join()
 
-        # kill log listener
+        # kill log listener last
         log.put('kill')
 
         # remove pid from list of running pids
